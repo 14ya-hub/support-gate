@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>サポート状況</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f6f7f9; color: #222;
+    font-family: -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif; }
+  #msg { padding: 48px 16px; text-align: center; font-size: 15px; line-height: 1.8; }
+  #msg .sub { color: #777; font-size: 13px; }
+  #msg button { margin-top: 12px; padding: 8px 18px; font-size: 14px; border-radius: 6px;
+    border: 1px solid #bbb; background: #fff; cursor: pointer; }
+  iframe { display: none; border: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="msg">読み込んでいます…<div class="sub">10秒ほどかかることがあります</div></div>
+<iframe id="view" title="サポート状況"></iframe>
+<script>
+/*
+ * Chatwork未返信ツール（GAS）の外の入口。
+ *
+ * Googleアカウントを複数ログインしたブラウザでは、GASのウェブアプリを直接開くと
+ * 「現在、ファイルを開くことができません」になる。ログイン情報を付けなければ通るので、
+ * このページが credentials:"omit" でGASから画面をもらい、iframe に流し込む。
+ *
+ * GASのURLはこのファイルに書かない（公開リポジトリに置くため）。
+ * 共有リンクの # のうしろにデプロイIDを付ける:  https://…/#AKfycb…
+ * # 以降はサーバーに送られない。
+ */
+(function () {
+  var msg = document.getElementById('msg');
+  var view = document.getElementById('view');
+  var STORE = 'gasDeployId';
+
+  function fail(text, retry) {
+    msg.innerHTML = '';
+    var p = document.createElement('div');
+    p.textContent = text;
+    msg.appendChild(p);
+    if (retry) {
+      var b = document.createElement('button');
+      b.textContent = 'もう一度読み込む';
+      b.onclick = function () { location.reload(); };
+      msg.appendChild(b);
+    }
+    msg.style.display = '';
+    view.style.display = 'none';
+  }
+
+  // デプロイID。# にあれば覚えておき、無ければ前回のものを使う。
+  var id = decodeURIComponent(location.hash.replace(/^#/, '')).trim();
+  var base = '';
+  var local = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+  if (local && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(id)) {
+    base = id;                                   // 手元の試験用
+  } else {
+    if (!/^AKfyc[\w-]{20,}$/.test(id)) {
+      try { id = localStorage.getItem(STORE) || ''; } catch (e) { id = ''; }
+    }
+    if (/^AKfyc[\w-]{20,}$/.test(id)) {
+      try { localStorage.setItem(STORE, id); } catch (e) {}
+      base = 'https://script.google.com/macros/s/' + id + '/exec';
+    }
+  }
+  if (!base) {
+    fail('リンクが正しくありません。共有されたリンクを、# から後ろも含めてそのまま開いてください。');
+    return;
+  }
+
+  var isHelp = /[?&]help=1/.test(location.search);
+
+  function get(query) {
+    return fetch(base + '?' + query, { credentials: 'omit', cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) { throw new Error('HTTP ' + r.status); }
+        return r.json();
+      });
+  }
+
+  // iframe の中に置く google.script.run の代役。
+  // google.script.run.withSuccessHandler(f).withFailureHandler(g).関数名(引数…) を
+  // ?act=関数名&a=[引数] の呼び出しに置き換える。
+  function makeRun(ok, ng) {
+    return new Proxy({}, {
+      get: function (_, key) {
+        if (key === 'withSuccessHandler') { return function (f) { return makeRun(f, ng); }; }
+        if (key === 'withFailureHandler') { return function (f) { return makeRun(ok, f); }; }
+        if (typeof key !== 'string') { return undefined; }
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          get('act=' + encodeURIComponent(key) + '&a=' + encodeURIComponent(JSON.stringify(args)))
+            .then(function (j) {
+              if (j && j.error) { if (ng) { ng(new Error(j.error)); } return; }
+              if (ok) { ok(j ? j.result : undefined); }
+            }, function (e) { if (ng) { ng(e); } });
+        };
+      }
+    });
+  }
+
+  var helpUrl = location.pathname + '?help=1' + location.hash;
+
+  view.addEventListener('load', function () {
+    var w = view.contentWindow;
+    var d = view.contentDocument;
+    if (!d || !d.body || !d.body.childNodes.length) { return; }
+    // 「使い方」はGASのURLを指しているので、この入口経由に差し替える。
+    var links = d.querySelectorAll('a.helpb');
+    for (var i = 0; i < links.length; i++) {
+      links[i].href = helpUrl;
+      links[i].target = '_blank';
+    }
+    msg.style.display = 'none';
+    view.style.display = 'block';
+  });
+
+  get(isHelp ? 'view=help' : 'view=dashboard').then(function (j) {
+    if (!j || !j.ok || typeof j.html !== 'string') {
+      fail('読み込めませんでした。' + ((j && j.error) || 'GASが新しい版に更新されていない可能性があります。'), true);
+      return;
+    }
+    document.title = j.title || document.title;
+    // 代役は、ページ本体のスクリプトより先に置く必要がある。
+    // srcdoc の iframe は親と同じ扱いなので、親から直接差し込める。
+    var head = '<!doctype html><html lang="ja"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+      '<base target="_blank"><script>window.google={script:{run:parent.__gasRun}};<\/script>' +
+      '</head><body>';
+    window.__gasRun = makeRun(null, null);
+    view.srcdoc = head + j.html + '</body></html>';
+  }, function (e) {
+    fail('読み込めませんでした（' + e.message + '）。通信の状態を確かめて、もう一度お試しください。', true);
+  });
+})();
+</script>
+</body>
+</html>
